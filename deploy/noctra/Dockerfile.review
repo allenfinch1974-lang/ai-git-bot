@@ -1,0 +1,26 @@
+# NOCTRA's review-only image (PRD 69b). Same build as the upstream Dockerfile, but the runtime carries only what
+# PR review and @bot chat need: no Playwright/Cypress, .NET, Go, Rust, k6 or the coding-agent toolchain (those
+# features are switched off for this bot). About a fifth of the upstream image.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-alpine AS build
+WORKDIR /app
+COPY pom.xml .
+RUN apk add --no-cache maven && mvn dependency:go-offline -B
+COPY src ./src
+RUN mvn clean package -DskipTests -o
+
+FROM eclipse-temurin:21-jre-noble
+RUN set -eux; apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl git tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    if getent passwd 1000 >/dev/null; then userdel -r "$(getent passwd 1000 | cut -d: -f1)" 2>/dev/null || true; fi; \
+    if getent group 1000 >/dev/null; then groupdel "$(getent group 1000 | cut -d: -f1)" || true; fi; \
+    groupadd -g 1000 appgroup; useradd -m -u 1000 -g appgroup -s /bin/bash appuser; \
+    mkdir -p /app/prompts; chown -R appuser:appgroup /app
+WORKDIR /app
+COPY --from=build --chown=appuser:appgroup /app/target/*.jar app.jar
+COPY --chown=appuser:appgroup prompts/ /app/prompts/
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:8080/actuator/health || exit 1
+ENTRYPOINT ["/usr/bin/tini", "--", "java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=70.0", "-jar", "app.jar"]
