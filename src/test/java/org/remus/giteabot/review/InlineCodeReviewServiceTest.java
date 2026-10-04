@@ -189,7 +189,7 @@ class InlineCodeReviewServiceTest {
     }
 
     @Test
-    void reReviewWithNothingTouchedPostsNothing() {
+    void reReviewWithNothingTouchedPostsANoChangeNoteWithoutAModelCall() {
         GitHubReview prev = new GitHubReview();
         prev.setId(5L);
         prev.setBody(InlineReviewComposer.SUMMARY_MARKER_PREFIX + " -->");
@@ -198,11 +198,20 @@ class InlineCodeReviewServiceTest {
         when(repo.getCompareDiff("acme", "web", OLD, HEAD)).thenReturn(String.join("\n",
                 "diff --git a/README.md b/README.md", "--- a/README.md", "+++ b/README.md",
                 "@@ -1 +1 @@", "-a", "+b", ""));
-        when(repo.getReviewThreads("acme", "web", 7L)).thenReturn(List.of());
+        String mustBody = InlineReviewComposer.renderComment(new ReviewFinding("app/other.py", 3,
+                ReviewFinding.Side.RIGHT, ReviewFinding.Severity.MUST_FIX, "Still broken", "x"));
+        when(repo.getReviewThreads("acme", "web", 7L)).thenReturn(List.of(
+                new ReviewThread("T9", false, false, "app/pool.py", 51, 109L, "ai_bot", mustBody)));
 
-        assertFalse(service.reviewPullRequestInline(payload()));
+        assertTrue(service.reviewPullRequestInline(payload()));
+
         verify(ai, never()).submitReviewPrompt(any(), any(), any());
-        verify(repo, never()).submitInlineReview(any(), any(), any(), any(), any(), anyList());
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        List<InlineReviewDraft> comments = captureComments(body);
+        assertTrue(comments.isEmpty());
+        assertTrue(body.getValue().contains("nothing to re-review"));
+        assertTrue(body.getValue().contains("1 must-fix finding(s) from earlier reviews are still open"));
+        assertTrue(body.getValue().contains("head=" + HEAD));
     }
 
     @Test

@@ -124,8 +124,23 @@ public class InlineCodeReviewService {
                     }
                 }
                 if (reviewDiff.isBlank() && priors.isEmpty()) {
-                    log.info("New commits on PR #{} touch none of its reviewed hunks; nothing to re-review", prNumber);
-                    return false;
+                    // No model call, but still a (summary-only) review AT this head, so a merge gate that
+                    // waits for "reviewed at the current head" is not left waiting forever.
+                    log.info("New commits on PR #{} touch none of its reviewed hunks; posting a no-change note", prNumber);
+                    long openMust = openThreads.stream()
+                            .filter(t -> InlineReviewComposer.severityOf(t.firstCommentBody())
+                                    == ReviewFinding.Severity.MUST_FIX)
+                            .count();
+                    List<String> notes = new ArrayList<>();
+                    notes.add("the new commits since `" + shortSha(lastSha) + "` change no code that is reviewed here; "
+                            + "nothing to re-review.");
+                    if (openMust > 0) {
+                        notes.add(openMust + " must-fix finding(s) from earlier reviews are still open.");
+                    }
+                    InlineReviewComposer.ComposedReview noChange =
+                            composer.compose("", List.of(), fullIndex, headSha, List.of(), notes);
+                    repositoryClient.submitInlineReview(owner, repo, prNumber, headSha, noChange.body(), List.of());
+                    return true;
                 }
             }
 
