@@ -116,6 +116,47 @@ class ReviewWorkflowTest {
         assertEquals(writeFailure, thrown);
     }
 
+    @Test
+    void inlineFindingsParamRoutesToInlineReview() {
+        Bot bot = botWith(PostReviewAction.NONE);
+        org.remus.giteabot.prworkflow.config.WorkflowConfiguration cfg =
+                new org.remus.giteabot.prworkflow.config.WorkflowConfiguration();
+        cfg.setId(3L);
+        bot.setWorkflowConfiguration(cfg);
+        when(selectionService.resolveParams(3L, ReviewWorkflow.KEY)).thenReturn(Map.of("inlineFindings", true));
+        WebhookPayload payload = payloadFor("acme", "web", 11L);
+        when(codeReviewService.reviewPullRequestInline(payload)).thenReturn(true);
+
+        WorkflowResult result = workflow.run(ctx(bot, payload));
+
+        assertEquals(WorkflowResultStatus.SUCCESS, result.status());
+        verify(codeReviewService, never()).reviewPullRequest(any(), any());
+        verify(repoClient).postReviewAction(eq("acme"), eq("web"), eq(11L), eq(PostReviewAction.NONE));
+    }
+
+    @Test
+    void inlineFindingsOffKeepsSingleCommentReview() {
+        Bot bot = botWith(PostReviewAction.NONE);
+        org.remus.giteabot.prworkflow.config.WorkflowConfiguration cfg =
+                new org.remus.giteabot.prworkflow.config.WorkflowConfiguration();
+        cfg.setId(4L);
+        bot.setWorkflowConfiguration(cfg);
+        when(selectionService.resolveParams(4L, ReviewWorkflow.KEY)).thenReturn(Map.of("inlineFindings", "false"));
+        WebhookPayload payload = payloadFor("acme", "web", 12L);
+        when(codeReviewService.reviewPullRequest(payload, null)).thenReturn(true);
+
+        workflow.run(ctx(bot, payload));
+
+        verify(codeReviewService, never()).reviewPullRequestInline(any());
+    }
+
+    @Test
+    void paramsSchemaOffersInlineFindingsAsBoolean() {
+        var field = workflow.paramsSchema().fields().stream()
+                .filter(f -> f.name().equals("inlineFindings")).findFirst().orElseThrow();
+        assertEquals(org.remus.giteabot.prworkflow.WorkflowParamField.ParamType.BOOLEAN, field.type());
+    }
+
     private static PrWorkflowContext ctx(Bot bot, WebhookPayload payload) {
         return new PrWorkflowContext(bot, payload, 1L, (name, log) -> { /* no-op */ },
                 () -> false /* never cancelled */);

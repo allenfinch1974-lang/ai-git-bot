@@ -7,12 +7,17 @@ import org.remus.giteabot.repository.PostReviewAction;
 import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.WorkflowDispatchRequest;
 import org.remus.giteabot.repository.WorkflowRunStatus;
+import org.remus.giteabot.repository.model.InlineReviewDraft;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
+import org.remus.giteabot.repository.model.ReviewThread;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.web.client.RestClient;
 
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -221,6 +226,197 @@ public class GitHubApiClient implements RepositoryApiClient {
                 .retrieve()
                 .body(new ParameterizedTypeReference<>() {});
         return comments != null ? List.copyOf(comments) : List.of();
+    }
+
+    // ---- Inline (line-anchored) reviews ----
+
+    /** Pages of 100 threads fetched at most (500 threads) — far beyond any real PR. */
+    static final int MAX_THREAD_PAGES = 5;
+
+    private static final String THREADS_QUERY = """
+            query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100, after: $cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id isResolved isOutdated path line
+                      comments(first: 1) { nodes { databaseId body author { login } } }
+                    }
+                  }
+                }
+              }
+            }""";
+
+    private static final String RESOLVE_MUTATION = """
+            mutation($threadId: ID!) {
+              resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
+            }""";
+
+    @Override
+    public boolean supportsInlineReviews() {
+        return true;
+    }
+
+    @Override
+    public void submitInlineReview(String owner, String repo, Long pullNumber, String commitId,
+                                   String body, List<InlineReviewDraft> comments) {
+        List<AnchoredReviewComment> anchored = new ArrayList<>();
+        if (comments != null) {
+            for (InlineReviewDraft c : comments) {
+                anchored.add(new AnchoredReviewComment(c.path(), c.line(), c.side(), c.body()));
+            }
+        }
+        log.info("Posting inline review with {} line comment(s) on PR #{} in {}/{} at {}",
+                anchored.size(), pullNumber, owner, repo, commitId);
+        Map<String, Object> request = new LinkedHashMap<>();
+        if (commitId != null && !commitId.isBlank()) {
+            request.put("commit_id", commitId);
+        }
+        request.put("body", body);
+        request.put("event", "COMMENT");
+        request.put("comments", anchored);
+        restClient.post()
+                .uri("/repos/{owner}/{repo}/pulls/{pull_number}/reviews", owner, repo, pullNumber)
+                .body(request)
+                .retrieve()
+                .toBodilessEntity();
+        log.info("Inline review posted successfully");
+    }
+
+    @Override
+    public String getCompareDiff(String owner, String repo, String baseSha, String headSha) {
+        log.info("Fetching compare diff {}...{} in {}/{}", baseSha, headSha, owner, repo);
+        return restClient.get()
+                .uri("/repos/{owner}/{repo}/compare/{basehead}", owner, repo, baseSha + "..." + headSha)
+                .header("Accept", "application/vnd.github.v3.diff")
+                .retrieve()
+                .body(String.class);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<ReviewThread> getReviewThreads(String owner, String repo, Long pullNumber) {
+        log.info("Fetching review threads for PR #{} in {}/{}", pullNumber, owner, repo);
+        List<ReviewThread> threads = new ArrayList<>();
+        String cursor = null;
+        for (int page = 0; page < MAX_THREAD_PAGES; page++) {
+            Map<String, Object> variables = new LinkedHashMap<>();
+            variables.put("owner", owner);
+            variables.put("repo", repo);
+            variables.put("number", pullNumber);
+            variables.put("cursor", cursor);
+            Map<String, Object> data = graphql(THREADS_QUERY, variables);
+            Map<String, Object> rt = (Map<String, Object>) dig(data, "repository", "pullRequest", "reviewThreads");
+            if (rt == null) {
+                break;
+            }
+            Object nodes = rt.get("nodes");
+            if (nodes instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> m) {
+                        threads.add(toThread((Map<String, Object>) m));
+                    }
+                }
+            }
+            Map<String, Object> pageInfo = (Map<String, Object>) rt.get("pageInfo");
+            if (pageInfo == null || !Boolean.TRUE.equals(pageInfo.get("hasNextPage"))) {
+                break;
+            }
+            cursor = (String) pageInfo.get("endCursor");
+        }
+        return threads;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ReviewThread toThread(Map<String, Object> m) {
+        Long firstId = null;
+        String author = null;
+        String body = null;
+        Object first = dig(m, "comments", "nodes");
+        if (first instanceof List<?> l && !l.isEmpty() && l.getFirst() instanceof Map<?, ?> c) {
+            Map<String, Object> comment = (Map<String, Object>) c;
+            if (comment.get("databaseId") instanceof Number n) {
+                firstId = n.longValue();
+            }
+            body = (String) comment.get("body");
+            Object login = dig(comment, "author", "login");
+            author = login == null ? null : login.toString();
+        }
+        Integer line = m.get("line") instanceof Number n ? n.intValue() : null;
+        return new ReviewThread((String) m.get("id"),
+                Boolean.TRUE.equals(m.get("isResolved")),
+                Boolean.TRUE.equals(m.get("isOutdated")),
+                (String) m.get("path"), line, firstId, author, body);
+    }
+
+    @Override
+    public void replyToReviewComment(String owner, String repo, Long pullNumber, Long commentId, String body) {
+        log.info("Replying to review comment #{} on PR #{} in {}/{}", commentId, pullNumber, owner, repo);
+        restClient.post()
+                .uri("/repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies",
+                        owner, repo, pullNumber, commentId)
+                .body(new CommentRequest(body))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void resolveReviewThread(String owner, String repo, String threadId) {
+        log.info("Resolving review thread {} in {}/{}", threadId, owner, repo);
+        Map<String, Object> variables = new LinkedHashMap<>();
+        variables.put("threadId", threadId);
+        graphql(RESOLVE_MUTATION, variables);
+    }
+
+    /**
+     * GitHub's GraphQL endpoint for this client's REST base URL:
+     * {@code https://api.github.com} → {@code https://api.github.com/graphql};
+     * GitHub Enterprise {@code https://host/api/v3} → {@code https://host/api/graphql}.
+     */
+    static String graphqlUrl(String restBaseUrl) {
+        String base = restBaseUrl == null ? "https://api.github.com" : restBaseUrl.strip();
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        if (base.endsWith("/api/v3")) {
+            return base.substring(0, base.length() - "/v3".length()) + "/graphql";
+        }
+        return base + "/graphql";
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> graphql(String query, Map<String, Object> variables) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("query", query);
+        request.put("variables", variables);
+        Map<String, Object> response = restClient.post()
+                .uri(URI.create(graphqlUrl(credentials.baseUrl())))
+                .body(request)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        if (response == null) {
+            throw new IllegalStateException("Empty GraphQL response");
+        }
+        Object errors = response.get("errors");
+        if (errors instanceof List<?> l && !l.isEmpty()) {
+            Object firstMessage = l.getFirst() instanceof Map<?, ?> e ? e.get("message") : l.getFirst();
+            throw new IllegalStateException("GitHub GraphQL error: " + firstMessage);
+        }
+        Object data = response.get("data");
+        return data instanceof Map<?, ?> d ? (Map<String, Object>) d : Map.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object dig(Map<String, Object> root, String... keys) {
+        Object cur = root;
+        for (String k : keys) {
+            if (!(cur instanceof Map<?, ?> m)) {
+                return null;
+            }
+            cur = ((Map<String, Object>) m).get(k);
+        }
+        return cur;
     }
 
     // ---- PR context enrichment ----
@@ -591,6 +787,7 @@ public class GitHubApiClient implements RepositoryApiClient {
     record ReactionRequest(String content) {}
     record InlineReviewRequest(String body, String event, List<InlineReviewComment> comments) {}
     record InlineReviewComment(String body, String path, int line) {}
+    record AnchoredReviewComment(String path, int line, String side, String body) {}
     record CreatePullRequest(String title, String body, String head, String base) {}
     record AssigneesRequest(List<String> assignees) {}
     record CreateIssue(String title, String body) {}

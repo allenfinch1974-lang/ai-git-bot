@@ -25,6 +25,9 @@ public class GitHubReview implements Review {
     @JsonProperty("submitted_at")
     private String submittedAt;
 
+    @JsonProperty("commit_id")
+    private String commitId;
+
     @Override
     public String getUserLogin() {
         return user != null ? user.getLogin() : null;
