@@ -45,6 +45,9 @@ public class InlineCodeReviewService {
 
     static final String EMPTY_REVIEW_DIFF = "(no changed hunks in the new commits)";
 
+    /** Lines within which a new finding counts as a repeat of a still-open thread on the same file. */
+    static final int REPEAT_DISTANCE = 2;
+
     private final CodeReviewService base;
     private final RepositoryApiClient repositoryClient;
     private final AiClient aiClient;
@@ -205,6 +208,15 @@ public class InlineCodeReviewService {
             }
 
             List<String> resolvedNotes = acknowledgeResolved(owner, repo, prNumber, headSha, resolvedIds, priorById);
+            List<ReviewThread> stillOpen = openThreads.stream()
+                    .filter(t -> !isResolvedNow(t, resolvedIds, priorById))
+                    .toList();
+            int before = findings.size();
+            findings.removeIf(f -> repeatsOpenThread(f, stillOpen));
+            if (findings.size() < before) {
+                notes.add((before - findings.size()) + " finding(s) repeated a thread that is still open and were not "
+                        + "posted again.");
+            }
             long stillOpenMustFix = openThreads.stream()
                     .filter(t -> InlineReviewComposer.severityOf(t.firstCommentBody()) == ReviewFinding.Severity.MUST_FIX)
                     .filter(t -> !isResolvedNow(t, resolvedIds, priorById))
@@ -279,6 +291,20 @@ public class InlineCodeReviewService {
             }
         }
         return resolvedNotes;
+    }
+
+    /** A new finding on (nearly) the same line of the same file as a still-open bot thread is a repeat. */
+    static boolean repeatsOpenThread(ReviewFinding f, List<ReviewThread> stillOpen) {
+        if (f.line() == null || f.side() != ReviewFinding.Side.RIGHT) {
+            return false;
+        }
+        for (ReviewThread t : stillOpen) {
+            if (t.line() != null && t.path() != null && t.path().equals(f.path())
+                    && Math.abs(t.line() - f.line()) <= REPEAT_DISTANCE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isResolvedNow(ReviewThread t, Set<String> resolvedIds, Map<String, ReviewThread> priorById) {

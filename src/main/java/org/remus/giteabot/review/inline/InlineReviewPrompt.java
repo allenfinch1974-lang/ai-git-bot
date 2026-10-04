@@ -40,6 +40,7 @@ public final class InlineReviewPrompt {
             - One finding per distinct problem; do not repeat a finding on several lines.
             - No problems: "findings": [].
             - "resolved_prior": only on a re-review; list the ids of PRIOR FINDINGS that the new code fixes.
+              Never report a prior finding again as a new finding: one that is not fixed simply stays open.
             """;
 
     /** A prior bot finding still open on the PR, shown to the model on a re-review. */
