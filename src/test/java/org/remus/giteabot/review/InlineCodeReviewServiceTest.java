@@ -215,6 +215,35 @@ class InlineCodeReviewServiceTest {
     }
 
     @Test
+    void reReviewDoesNotRepostAFindingThatIsStillOpen() {
+        GitHubReview prev = new GitHubReview();
+        prev.setId(5L);
+        prev.setBody(InlineReviewComposer.SUMMARY_MARKER_PREFIX + " must_fix=1 -->");
+        prev.setCommitId(OLD);
+        when(repo.getReviews("acme", "web", 7L)).thenReturn(List.of(prev));
+        when(repo.getCompareDiff("acme", "web", OLD, HEAD)).thenReturn(String.join("\n",
+                "diff --git a/app/pool.py b/app/pool.py", "--- a/app/pool.py", "+++ b/app/pool.py",
+                "@@ -11 +11 @@", "-_SCOPES = []", "+_SCOPES = {}", ""));
+        String mustBody = InlineReviewComposer.renderComment(new ReviewFinding("app/pool.py", 12,
+                ReviewFinding.Side.RIGHT, ReviewFinding.Severity.MUST_FIX, "Keyed by id()", "x"));
+        when(repo.getReviewThreads("acme", "web", 7L)).thenReturn(List.of(
+                new ReviewThread("T1", false, false, "app/pool.py", 12, 100L, "ai_bot", mustBody)));
+        when(ai.submitReviewPrompt(anyString(), isNull(), anyString())).thenReturn(
+                "{\"summary\":\"s\",\"findings\":[{\"path\":\"app/pool.py\",\"line\":12,"
+                        + "\"severity\":\"must_fix\",\"title\":\"Still keyed by id()\",\"body\":\"b\"}],"
+                        + "\"resolved_prior\":[]}");
+
+        assertTrue(service.reviewPullRequestInline(payload()));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        List<InlineReviewDraft> comments = captureComments(body);
+        assertTrue(comments.isEmpty());
+        assertTrue(body.getValue().contains("1 finding(s) repeated a thread that is still open"));
+        assertTrue(body.getValue().contains("1 must-fix finding(s) from earlier reviews are still open"));
+        verify(repo, never()).resolveReviewThread(any(), any(), any());
+    }
+
+    @Test
     void rejectedAnchorsAreRetriedWithEverythingInTheSummary() {
         when(repo.getReviews("acme", "web", 7L)).thenReturn(List.of());
         when(ai.submitReviewPrompt(anyString(), isNull(), anyString())).thenReturn(
