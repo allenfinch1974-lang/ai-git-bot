@@ -180,6 +180,7 @@ class InlineCodeReviewServiceTest {
         assertTrue(sent.contains("P1: `app/pool.py` line 11 — Wrong container"));
         assertFalse(sent.contains("Unrelated"));
         verify(repo).replyToReviewComment(eq("acme"), eq("web"), eq(7L), eq(100L), contains("Looks fixed in `bbbbbbb`"));
+        verify(repo).replyToReviewComment(eq("acme"), eq("web"), eq(7L), eq(100L), contains("<!-- ai-git-bot:confirmed head="));
         verify(repo).resolveReviewThread("acme", "web", "T1");
         verify(repo, times(1)).resolveReviewThread(any(), any(), any());
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);

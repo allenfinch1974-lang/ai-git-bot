@@ -280,7 +280,10 @@ public class InlineCodeReviewService {
                 if (t.firstCommentId() != null) {
                     repositoryClient.replyToReviewComment(owner, repo, prNumber, t.firstCommentId(),
                             "✅ Looks fixed" + (headSha != null ? " in `" + shortSha(headSha) + "`" : "")
-                                    + ". Resolving this thread.");
+                                    + ". Resolving this thread."
+                                    // NOCTRA: a machine-readable confirmation, so the ship gate can tell the bot's own
+                                    // confirmation from someone typing the same words
+                                    + "\n\n<!-- ai-git-bot:confirmed head=" + (headSha != null ? headSha : "") + " -->");
                 }
                 if (t.id() != null) {
                     repositoryClient.resolveReviewThread(owner, repo, t.id());
