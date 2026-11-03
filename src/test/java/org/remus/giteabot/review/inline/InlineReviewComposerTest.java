@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -108,5 +109,50 @@ class InlineReviewComposerTest {
         var out = composer.compose("", fs, DiffLineIndex.parse(""), null, List.of(), List.of());
         assertTrue(out.comments().isEmpty());
         assertEquals(1, out.folded().size());
+    }
+
+    @Test
+    void countsMustFixMentionsInUnparsedText() {
+        // the raw-answer shapes the model actually writes: tight JSON, spaced JSON, consider entries
+        String raw = "{\"summary\": \"Two blocking problems remain\", \"findings\": [\n"
+                + " {\"path\": \"a.py\", \"line\": 1, \"severity\": \"must_fix\", \"title\": \"One\"},\n"
+                + " {\"path\": \"b.py\", \"line\": 2, \"severity\":\"must_fix\", \"title\": \"Two\"},\n"
+                + " {\"path\": \"c.py\", \"line\": 3, \"severity\": \"consider\", \"title\": \"Meh\"}]}";
+        assertEquals(2, InlineReviewComposer.countMustFixMentions(raw));
+        assertEquals(0, InlineReviewComposer.countMustFixMentions(null));
+        assertEquals(0, InlineReviewComposer.countMustFixMentions("  \n"));
+        assertEquals(0, InlineReviewComposer.countMustFixMentions("{\"severity\": \"consider\"} alone"));
+    }
+
+    @Test
+    void unprovenMustFixFailsClosedInTheMarker() {
+        // the #595 shape: three must-fix severities named in an answer that did not parse, no anchored
+        // findings. The marker must say unknown — never a clean zero a gate could read as "ship it".
+        var out = composer.compose("{\"findings\": [{\"severity\": \"must_fix\"}, {\"severity\": \"must_fix\"}]}",
+                List.of(), index, "abcdef1234567", List.of(),
+                List.of("part of the review came back without line anchors, so it is in this summary."), 3);
+        assertTrue(out.comments().isEmpty());
+        assertTrue(out.body().contains("**Must fix: at least 3** · Consider: 0 · at `abcdef1`"));
+        assertTrue(out.body().contains("<!-- ai-git-bot:summary must_fix=unknown consider=0 head=abcdef1234567 -->"));
+        assertTrue(out.body().contains("part of the review came back without line anchors"));
+        assertFalse(out.body().contains("No findings."), "unproven must-fix mentions are findings, not 'no findings'");
+    }
+
+    @Test
+    void provenCountsWithUnprovenMustFixStillFailClosed() {
+        // one anchored must-fix plus two unproven mentions: the header adds them, the marker stays unknown
+        var out = composer.compose("Mixed.", List.of(must("app/pool.py", 11, "Bug")),
+                index, "abcdef1234567", List.of(), List.of(), 2);
+        assertEquals(1, out.mustFix());
+        assertTrue(out.body().contains("**Must fix: at least 3**"));
+        assertTrue(out.body().contains("must_fix=unknown consider=0 head=abcdef1234567"));
+    }
+
+    @Test
+    void fullyParsedReviewsKeepTheirNumericMarker() {
+        // zero unproven mentions: today's behavior unchanged, a parsed clean review still says 0
+        var out = composer.compose("Fine.", List.of(), index, "abc", List.of(), List.of(), 0);
+        assertTrue(out.body().contains("No findings."));
+        assertTrue(out.body().contains("<!-- ai-git-bot:summary must_fix=0 consider=0 head=abc -->"));
     }
 }

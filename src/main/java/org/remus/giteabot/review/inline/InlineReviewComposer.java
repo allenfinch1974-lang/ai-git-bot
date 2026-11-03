@@ -28,6 +28,13 @@ public final class InlineReviewComposer {
     private static final Pattern SEVERITY_IN_MARKER = Pattern.compile(
             Pattern.quote(FINDING_MARKER_PREFIX) + "\\s+severity=([a-z_]+)");
 
+    /** The JSON severity field the model writes in an answer that could not be parsed into findings. */
+    private static final Pattern SEVERITY_IN_JSON = Pattern.compile(
+            "\"severity\"\\s*:\\s*\"must_fix\"", Pattern.CASE_INSENSITIVE);
+
+    /** Marker value that means "the must-fix count cannot be vouched for": no gate may read it as a number. */
+    public static final String UNKNOWN_COUNT = "unknown";
+
     /** Default distance (in lines) a near-miss anchor may be moved inside the same hunk. */
     public static final int DEFAULT_SNAP_DISTANCE = 3;
 
@@ -61,6 +68,19 @@ public final class InlineReviewComposer {
      */
     public ComposedReview compose(String summary, List<ReviewFinding> findings, DiffLineIndex index,
                                   String headSha, List<String> resolvedNotes, List<String> notes) {
+        return compose(summary, findings, index, headSha, resolvedNotes, notes, 0);
+    }
+
+    /**
+     * @param unprovenMustFix must-fix severities the model named in text that could not be parsed into
+     *                        findings. Above zero the must-fix count cannot be vouched for: the header
+     *                        says "at least" and the summary marker says {@value #UNKNOWN_COUNT}, so a
+     *                        gate that reads the marker never mistakes an unparseable answer for a
+     *                        clean review (the #595 silent-ship path).
+     */
+    public ComposedReview compose(String summary, List<ReviewFinding> findings, DiffLineIndex index,
+                                  String headSha, List<String> resolvedNotes, List<String> notes,
+                                  int unprovenMustFix) {
         List<ReviewFinding> ordered = new ArrayList<>(findings == null ? List.of() : findings);
         // must-fix first so they win the comment budget
         ordered.sort((a, b) -> Boolean.compare(b.isMustFix(), a.isMustFix()));
@@ -98,7 +118,8 @@ public final class InlineReviewComposer {
         }
 
         String body = renderSummary(summary, mustFix, consider, comments.size(), folded, headSha,
-                resolvedNotes == null ? List.of() : resolvedNotes, notes == null ? List.of() : notes);
+                resolvedNotes == null ? List.of() : resolvedNotes, notes == null ? List.of() : notes,
+                Math.max(0, unprovenMustFix));
         return new ComposedReview(body, comments, mustFix, consider, folded);
     }
 
@@ -120,10 +141,17 @@ public final class InlineReviewComposer {
 
     String renderSummary(String summary, int mustFix, int consider, int anchored,
                          List<ReviewFinding> folded, String headSha,
-                         List<String> resolvedNotes, List<String> notes) {
+                         List<String> resolvedNotes, List<String> notes, int unprovenMustFix) {
         StringBuilder sb = new StringBuilder();
         sb.append("## 🤖 AI Code Review\n\n");
-        sb.append("**Must fix: ").append(mustFix).append("** · Consider: ").append(consider);
+        sb.append("**Must fix: ");
+        if (unprovenMustFix > 0) {
+            // what could not be parsed names at least this many more; the true count is unknown
+            sb.append("at least ").append(mustFix + unprovenMustFix);
+        } else {
+            sb.append(mustFix);
+        }
+        sb.append("** · Consider: ").append(consider);
         if (headSha != null && !headSha.isBlank()) {
             sb.append(" · at `").append(headSha, 0, Math.min(7, headSha.length())).append("`");
         }
@@ -131,7 +159,7 @@ public final class InlineReviewComposer {
         if (summary != null && !summary.isBlank()) {
             sb.append(summary.strip()).append("\n\n");
         }
-        if (mustFix == 0 && consider == 0) {
+        if (mustFix == 0 && consider == 0 && unprovenMustFix == 0) {
             sb.append("No findings.\n\n");
         } else if (anchored > 0) {
             sb.append(anchored).append(anchored == 1 ? " finding is" : " findings are")
@@ -166,13 +194,31 @@ public final class InlineReviewComposer {
             sb.append("\n");
         }
         sb.append("---\n*Automated review by AI Git Bot*\n");
-        sb.append(SUMMARY_MARKER_PREFIX).append(" must_fix=").append(mustFix)
+        sb.append(SUMMARY_MARKER_PREFIX).append(" must_fix=")
+                .append(unprovenMustFix > 0 ? UNKNOWN_COUNT : String.valueOf(mustFix))
                 .append(" consider=").append(consider);
         if (headSha != null && !headSha.isBlank()) {
             sb.append(" head=").append(headSha);
         }
         sb.append(" -->");
         return sb.toString();
+    }
+
+    /**
+     * Must-fix severities named in text the bot could not parse into findings (the raw answer the
+     * service keeps as summary). A lower bound only — whatever the model wrote, unescaped, in an
+     * answer that ignored the JSON contract — but a count a gate can never read as clean zero.
+     */
+    public static int countMustFixMentions(String text) {
+        if (text == null || text.isBlank()) {
+            return 0;
+        }
+        Matcher m = SEVERITY_IN_JSON.matcher(text);
+        int n = 0;
+        while (m.find()) {
+            n++;
+        }
+        return n;
     }
 
     /** Severity carried by a bot comment's hidden marker, or {@code null} if the body has none. */

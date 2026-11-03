@@ -159,6 +159,7 @@ public class InlineCodeReviewService {
             List<ReviewFinding> findings = new ArrayList<>();
             Set<String> resolvedIds = new LinkedHashSet<>();
             List<String> notes = new ArrayList<>();
+            int unprovenMustFix = 0;
             int failed = 0;
             int total = chunking.chunks().size();
             Exception lastError = null;
@@ -186,8 +187,11 @@ public class InlineCodeReviewService {
                         chunkPriors.forEach(p -> allowed.add(p.id()));
                         r.resolvedPrior().stream().filter(allowed::contains).forEach(resolvedIds::add);
                     } else if (raw != null && !raw.isBlank()) {
-                        // The model ignored the JSON contract: keep its words as summary text.
+                        // The model ignored the JSON contract: keep its words as summary text — and count
+                        // the must-fix severities it named in them, so the summary marker can say the
+                        // count is unknown instead of a clean zero no gate may trust (#595).
                         summaries.add(raw.strip());
+                        unprovenMustFix += InlineReviewComposer.countMustFixMentions(raw);
                         notes.add("part of the review came back without line anchors, so it is in this summary.");
                     }
                 } catch (Exception e) {
@@ -230,8 +234,8 @@ public class InlineCodeReviewService {
 
             String summary = String.join("\n\n", summaries);
             InlineReviewComposer.ComposedReview composed =
-                    composer.compose(summary, findings, fullIndex, headSha, resolvedNotes, notes);
-            post(owner, repo, prNumber, headSha, composed, summary, findings, resolvedNotes, notes);
+                    composer.compose(summary, findings, fullIndex, headSha, resolvedNotes, notes, unprovenMustFix);
+            post(owner, repo, prNumber, headSha, composed, summary, findings, resolvedNotes, notes, unprovenMustFix);
 
             ReviewSession session = sessionService.getOrCreateSession(owner, repo, prNumber, sessionPromptKey);
             sessionService.addMessage(session, "user", incremental
@@ -240,8 +244,9 @@ public class InlineCodeReviewService {
             sessionService.addMessage(session, "assistant", composed.body() + "\n\n" + findingsAsText(findings));
             sessionService.compactContextWindow(session);
 
-            log.info("Inline code review completed for PR #{} in {}/{}: {} must-fix, {} consider, {} line comment(s)",
-                    prNumber, owner, repo, composed.mustFix(), composed.consider(), composed.comments().size());
+            log.info("Inline code review completed for PR #{} in {}/{}: {} must-fix (+{} unproven), {} consider, {} line comment(s)",
+                    prNumber, owner, repo, composed.mustFix(), unprovenMustFix, composed.consider(),
+                    composed.comments().size());
             return true;
         } catch (Exception e) {
             log.error("Inline code review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
@@ -251,7 +256,7 @@ public class InlineCodeReviewService {
 
     private void post(String owner, String repo, Long prNumber, String headSha,
                       InlineReviewComposer.ComposedReview composed, String summary, List<ReviewFinding> findings,
-                      List<String> resolvedNotes, List<String> notes) {
+                      List<String> resolvedNotes, List<String> notes, int unprovenMustFix) {
         try {
             repositoryClient.submitInlineReview(owner, repo, prNumber, headSha, composed.body(), composed.comments());
         } catch (HttpClientErrorException e) {
@@ -262,7 +267,7 @@ public class InlineCodeReviewService {
             // post the same findings with every one of them in the summary.
             log.warn("Provider rejected the line comments ({}); posting all findings in the summary", e.getMessage());
             InlineReviewComposer.ComposedReview foldedAll = composer.compose(summary, findings,
-                    DiffLineIndex.parse(""), headSha, resolvedNotes, notes);
+                    DiffLineIndex.parse(""), headSha, resolvedNotes, notes, unprovenMustFix);
             repositoryClient.submitInlineReview(owner, repo, prNumber, headSha, foldedAll.body(), List.of());
         }
     }
