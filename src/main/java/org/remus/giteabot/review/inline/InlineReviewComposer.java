@@ -81,6 +81,18 @@ public final class InlineReviewComposer {
     public ComposedReview compose(String summary, List<ReviewFinding> findings, DiffLineIndex index,
                                   String headSha, List<String> resolvedNotes, List<String> notes,
                                   int unprovenMustFix) {
+        return compose(summary, findings, index, headSha, resolvedNotes, notes, unprovenMustFix, false);
+    }
+
+    /**
+     * @param incomplete      any part of the diff went unreviewed (a chunk whose answer did not parse,
+     *                        an API error, a truncated diff). Such a review cannot vouch for its
+     *                        must-fix count either, so it fails closed exactly like unproven mentions:
+     *                        the marker says {@value #UNKNOWN_COUNT}, never a number a gate reads as clean.
+     */
+    public ComposedReview compose(String summary, List<ReviewFinding> findings, DiffLineIndex index,
+                                  String headSha, List<String> resolvedNotes, List<String> notes,
+                                  int unprovenMustFix, boolean incomplete) {
         List<ReviewFinding> ordered = new ArrayList<>(findings == null ? List.of() : findings);
         // must-fix first so they win the comment budget
         ordered.sort((a, b) -> Boolean.compare(b.isMustFix(), a.isMustFix()));
@@ -119,7 +131,7 @@ public final class InlineReviewComposer {
 
         String body = renderSummary(summary, mustFix, consider, comments.size(), folded, headSha,
                 resolvedNotes == null ? List.of() : resolvedNotes, notes == null ? List.of() : notes,
-                Math.max(0, unprovenMustFix));
+                Math.max(0, unprovenMustFix), incomplete);
         return new ComposedReview(body, comments, mustFix, consider, folded);
     }
 
@@ -141,13 +153,18 @@ public final class InlineReviewComposer {
 
     String renderSummary(String summary, int mustFix, int consider, int anchored,
                          List<ReviewFinding> folded, String headSha,
-                         List<String> resolvedNotes, List<String> notes, int unprovenMustFix) {
+                         List<String> resolvedNotes, List<String> notes, int unprovenMustFix,
+                         boolean incomplete) {
+        // the bot cannot vouch for its must-fix count: unparseable answers named severities it kept
+        // only as text, or part of the diff went unreviewed (API error, truncation) — never a clean zero
+        boolean cannotVouch = unprovenMustFix > 0 || incomplete;
         StringBuilder sb = new StringBuilder();
         sb.append("## 🤖 AI Code Review\n\n");
         sb.append("**Must fix: ");
-        if (unprovenMustFix > 0) {
-            // what could not be parsed names at least this many more; the true count is unknown
+        if (cannotVouch && mustFix + unprovenMustFix > 0) {
             sb.append("at least ").append(mustFix + unprovenMustFix);
+        } else if (cannotVouch) {
+            sb.append(UNKNOWN_COUNT);
         } else {
             sb.append(mustFix);
         }
@@ -159,7 +176,7 @@ public final class InlineReviewComposer {
         if (summary != null && !summary.isBlank()) {
             sb.append(summary.strip()).append("\n\n");
         }
-        if (mustFix == 0 && consider == 0 && unprovenMustFix == 0) {
+        if (mustFix == 0 && consider == 0 && !cannotVouch) {
             sb.append("No findings.\n\n");
         } else if (anchored > 0) {
             sb.append(anchored).append(anchored == 1 ? " finding is" : " findings are")
@@ -195,7 +212,7 @@ public final class InlineReviewComposer {
         }
         sb.append("---\n*Automated review by AI Git Bot*\n");
         sb.append(SUMMARY_MARKER_PREFIX).append(" must_fix=")
-                .append(unprovenMustFix > 0 ? UNKNOWN_COUNT : String.valueOf(mustFix))
+                .append(cannotVouch ? UNKNOWN_COUNT : String.valueOf(mustFix))
                 .append(" consider=").append(consider);
         if (headSha != null && !headSha.isBlank()) {
             sb.append(" head=").append(headSha);

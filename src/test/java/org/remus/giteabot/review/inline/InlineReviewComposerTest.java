@@ -149,6 +149,27 @@ class InlineReviewComposerTest {
     }
 
     @Test
+    void anUnreviewedChunkFailsClosedEvenWithNothingCountable() {
+        // an API error or a truncated diff: no unproven text to count, but a chunk of the diff was
+        // never reviewed — the count cannot be vouched for, so never "No findings." / never a clean zero
+        var out = composer.compose("Two of three chunks reviewed.", List.of(), index, "abc",
+                List.of(), List.of("2 of 3 diff chunk(s) could not be reviewed due to API errors."), 0, true);
+        assertTrue(out.body().contains("**Must fix: unknown** · Consider: 0 · at `abc`"));
+        assertTrue(out.body().contains("<!-- ai-git-bot:summary must_fix=unknown consider=0 head=abc -->"));
+        assertFalse(out.body().contains("No findings."));
+    }
+
+    @Test
+    void anUnreviewedChunkWithAnchoredFindingsStillFailsClosed() {
+        // one anchored must-fix plus a chunk that never came back: "at least 1", marker unknown
+        var out = composer.compose("Partial.", List.of(must("app/pool.py", 11, "Bug")),
+                index, "abc", List.of(), List.of(), 0, true);
+        assertEquals(1, out.mustFix());
+        assertTrue(out.body().contains("**Must fix: at least 1**"));
+        assertTrue(out.body().contains("must_fix=unknown consider=0 head=abc"));
+    }
+
+    @Test
     void fullyParsedReviewsKeepTheirNumericMarker() {
         // zero unproven mentions: today's behavior unchanged, a parsed clean review still says 0
         var out = composer.compose("Fine.", List.of(), index, "abc", List.of(), List.of(), 0);
