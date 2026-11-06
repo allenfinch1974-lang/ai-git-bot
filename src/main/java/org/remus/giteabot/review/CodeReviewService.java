@@ -10,6 +10,7 @@ import org.remus.giteabot.repository.RepositoryApiClient;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
 import org.remus.giteabot.review.enrichment.PrContextEnricher;
+import org.remus.giteabot.review.inline.InlineReviewComposer;
 import org.remus.giteabot.session.ReviewSession;
 import org.remus.giteabot.session.SessionService;
 import org.springframework.web.client.HttpClientErrorException;
@@ -38,6 +39,7 @@ public class CodeReviewService {
     private final int maxDiffChunks;
     private final int retryTruncatedChunkChars;
     private final List<String> excludedFilePatterns;
+    private final InlineCodeReviewService inlineReviewer;
 
     public CodeReviewService(RepositoryApiClient repositoryClient, AiClient aiClient,
                              SessionService sessionService, String botUsername, ReviewConfigProperties reviewConfig,
@@ -61,13 +63,15 @@ public class CodeReviewService {
         this.maxDiffChunks = maxDiffChunks;
         this.retryTruncatedChunkChars = retryTruncatedChunkChars;
         this.excludedFilePatterns = DiffFileFilter.parsePatterns(excludedFilePatterns);
+        this.inlineReviewer = new InlineCodeReviewService(this, repositoryClient, aiClient, sessionService,
+                sessionPromptKey, reviewSystemPrompt, new InlineReviewComposer());
     }
 
     /**
      * Fetches the PR diff and strips any file sections matching the configured
      * exclude patterns before it reaches chunking, enrichment, or the AI.
      */
-    private String fetchFilteredDiff(String owner, String repo, Long prNumber) {
+    String fetchFilteredDiff(String owner, String repo, Long prNumber) {
         String diff = repositoryClient.getPullRequestDiff(owner, repo, prNumber);
         return DiffFileFilter.filter(diff, excludedFilePatterns);
     }
@@ -151,6 +155,22 @@ public class CodeReviewService {
             log.error("Code review failed for PR #{} in {}/{}: {}", prNumber, owner, repo, e.getMessage(), e);
             return false;
         }
+    }
+
+    /**
+     * Line-by-line review: structured findings posted as one provider review with
+     * comments anchored on the changed lines (see {@link InlineCodeReviewService}).
+     * Falls back to {@link #reviewPullRequest(WebhookPayload, String)} when the
+     * provider has no inline-review support.
+     *
+     * @return {@code true} when a review was posted
+     */
+    public boolean reviewPullRequestInline(WebhookPayload payload) {
+        if (!repositoryClient.supportsInlineReviews()) {
+            log.info("Provider has no inline reviews; posting a summary review instead");
+            return reviewPullRequest(payload, null);
+        }
+        return inlineReviewer.review(payload);
     }
 
     public void handleBotCommand(WebhookPayload payload, String promptName) {

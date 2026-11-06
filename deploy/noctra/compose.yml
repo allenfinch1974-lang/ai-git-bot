@@ -1,0 +1,51 @@
+# NOCTRA code-review bot (PRD 69b) on the build box. Run from /opt/reviewbot:
+#   docker compose -p reviewbot -f compose.yml --env-file secrets.env up -d
+# secrets.env (600, never committed): DATABASE_PASSWORD, APP_ENCRYPTION_KEY.
+# The app listens on 127.0.0.1 only; the public webhook path reaches it through prod's Caddy + a tunnel (see the
+# NOCTRA repo, scripts/review_loop/README.md). The admin UI is reached with an SSH tunnel, never publicly.
+services:
+  app:
+    image: noctra/ai-git-bot-review:${IMAGE_TAG:-latest}
+    ports:
+      - "127.0.0.1:8095:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DATABASE_URL: jdbc:postgresql://db:5432/giteabot
+      DATABASE_USERNAME: giteabot
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?set in secrets.env}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set in secrets.env}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://127.0.0.1:8095}
+      GITEABOT_SECURITY_LOGIN_METHOD: native
+      GITEABOT_SECRET_ENV_WHITELIST: ""
+      AI_USAGE_RAW_PAYLOADS_ENABLED: "false"
+      PROMETHEUS_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: "-Xmx768m"
+    mem_limit: 1200m
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [reviewbot]
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: giteabot
+      POSTGRES_USER: giteabot
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?set in secrets.env}
+    volumes:
+      - reviewbot-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U giteabot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 300m
+    restart: unless-stopped
+    networks: [reviewbot]
+
+volumes:
+  reviewbot-pgdata:
+
+networks:
+  reviewbot:

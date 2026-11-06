@@ -1,9 +1,11 @@
 package org.remus.giteabot.repository;
 
+import org.remus.giteabot.repository.model.InlineReviewDraft;
 import org.remus.giteabot.repository.model.RepositoryCredentials;
 import org.remus.giteabot.repository.model.PullRequestHead;
 import org.remus.giteabot.repository.model.Review;
 import org.remus.giteabot.repository.model.ReviewComment;
+import org.remus.giteabot.repository.model.ReviewThread;
 
 import java.net.URI;
 import java.util.List;
@@ -191,6 +193,49 @@ public interface RepositoryApiClient {
 
     void postInlineReviewComment(String owner, String repo, Long pullNumber,
                                  String filePath, int line, String body);
+
+    // ---- Inline (line-anchored) reviews ----
+
+    /**
+     * Whether this provider implements the inline-review operations below
+     * ({@link #submitInlineReview}, {@link #getCompareDiff}, {@link #getReviewThreads},
+     * {@link #replyToReviewComment}, {@link #resolveReviewThread}). Only then does the
+     * review workflow post line-by-line findings; otherwise it keeps the single
+     * summary comment.
+     */
+    default boolean supportsInlineReviews() {
+        return false;
+    }
+
+    /**
+     * Submits ONE review on {@code commitId}: a summary {@code body} plus line comments
+     * anchored by path, line and side. All anchors must be lines of the PR diff; the
+     * provider rejects the whole review otherwise.
+     */
+    default void submitInlineReview(String owner, String repo, Long pullNumber, String commitId,
+                                    String body, List<InlineReviewDraft> comments) {
+        throw new UnsupportedOperationException("Inline reviews are not supported by this repository provider");
+    }
+
+    /** Unified diff between two commits ({@code base...head}). */
+    default String getCompareDiff(String owner, String repo, String baseSha, String headSha) {
+        throw new UnsupportedOperationException("Commit comparison is not supported by this repository provider");
+    }
+
+    /** All review threads on a pull request (resolved ones included). */
+    default List<ReviewThread> getReviewThreads(String owner, String repo, Long pullNumber) {
+        return List.of();
+    }
+
+    /** Replies inside the thread that starts with review comment {@code commentId}. */
+    default void replyToReviewComment(String owner, String repo, Long pullNumber, Long commentId, String body) {
+        throw new UnsupportedOperationException("Review comment replies are not supported by this repository provider");
+    }
+
+    /** Marks a review thread resolved. */
+    default void resolveReviewThread(String owner, String repo, String threadId) {
+        throw new UnsupportedOperationException("Resolving review threads is not supported by this repository provider");
+    }
 
     List<Review> getReviews(String owner, String repo, Long pullNumber);
 

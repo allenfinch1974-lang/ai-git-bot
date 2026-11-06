@@ -20,4 +20,9 @@ public interface Review {
     String getSubmittedAt();
 
     Integer getCommentsCount();
+
+    /** Commit the review was submitted on, when the provider reports it. */
+    default String getCommitId() {
+        return null;
+    }
 }

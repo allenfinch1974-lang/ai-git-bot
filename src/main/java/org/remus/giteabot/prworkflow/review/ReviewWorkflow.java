@@ -118,7 +118,16 @@ public class ReviewWorkflow implements PrWorkflow {
                         "Comma-separated glob or filename patterns for files to exclude from the "
                                 + "review diff (e.g. *.lock, *.min.js, package-lock.json, **/generated/**). "
                                 + "Matching file sections are stripped before the diff is sent to the AI, "
-                                + "reducing token usage and noise. Leave blank to review all files."));
+                                + "reducing token usage and noise. Leave blank to review all files."),
+                new WorkflowParamField(ReviewParam.INLINE_FINDINGS,
+                        "Inline findings",
+                        WorkflowParamField.ParamType.BOOLEAN, false,
+                        "false",
+                        "Post the review line by line: the model returns structured findings "
+                                + "(must fix / consider) that are anchored on the changed lines and "
+                                + "submitted as one review with a summary counting the must-fix findings. "
+                                + "On new commits only the changed hunks are re-reviewed and fixed findings "
+                                + "are resolved. GitHub only; other providers keep the single comment."));
     }
 
     @Override
@@ -144,10 +153,11 @@ public class ReviewWorkflow implements PrWorkflow {
         int retryTruncatedChunkChars = intParam(params, ReviewParam.RETRY_TRUNCATED_CHUNK_CHARS,
                 chunkingProperties.getRetryTruncatedChunkChars());
         String excludedFilePatterns = strParam(params, ReviewParam.EXCLUDED_FILE_PATTERNS, "");
+        boolean inlineFindings = boolParam(params, ReviewParam.INLINE_FINDINGS, false);
 
         return switch (action) {
             case ACTION_REVIEW -> doReview(context, maxDiffCharsPerChunk, maxDiffChunks,
-                    retryTruncatedChunkChars, excludedFilePatterns);
+                    retryTruncatedChunkChars, excludedFilePatterns, inlineFindings);
             case ACTION_BOT_COMMAND -> doBotCommand(context, maxDiffCharsPerChunk, maxDiffChunks,
                     retryTruncatedChunkChars, excludedFilePatterns);
             case ACTION_INLINE_COMMENT -> doInlineComment(context, maxDiffCharsPerChunk, maxDiffChunks,
@@ -170,16 +180,19 @@ public class ReviewWorkflow implements PrWorkflow {
     /** Automated PR diff review on open/update. */
     private WorkflowResult doReview(PrWorkflowContext context,
                                     int maxDiffCharsPerChunk, int maxDiffChunks,
-                                    int retryTruncatedChunkChars, String excludedFilePatterns) {
+                                    int retryTruncatedChunkChars, String excludedFilePatterns,
+                                    boolean inlineFindings) {
         Bot bot = context.bot();
         WebhookPayload payload = context.payload();
         RepositoryApiClient repositoryClient = giteaClientFactory.getApiClient(bot.getGitIntegration());
 
         context.requireActive("before invoking CodeReviewService.reviewPullRequest");
 
-        boolean reviewed = codeReviewServiceFactory.create(bot, repositoryClient,
-                        maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns)
-                .reviewPullRequest(payload, null);
+        CodeReviewService service = codeReviewServiceFactory.create(bot, repositoryClient,
+                maxDiffCharsPerChunk, maxDiffChunks, retryTruncatedChunkChars, excludedFilePatterns);
+        boolean reviewed = inlineFindings
+                ? service.reviewPullRequestInline(payload)
+                : service.reviewPullRequest(payload, null);
 
         context.appendStep("review",
                 reviewed ? "Posted review comment for PR" : "Skipped — no diff or no eligible content");
@@ -258,6 +271,18 @@ public class ReviewWorkflow implements PrWorkflow {
         } catch (NumberFormatException e) {
             return fallback;
         }
+    }
+
+    private static boolean boolParam(Map<String, Object> params, ReviewParam name, boolean fallback) {
+        Object raw = params.get(name.key());
+        if (raw instanceof Boolean b) {
+            return b;
+        }
+        if (raw == null) {
+            return fallback;
+        }
+        String s = raw.toString().trim();
+        return s.equalsIgnoreCase("true") || s.equals("1") || s.equalsIgnoreCase("on");
     }
 
     private static String strParam(Map<String, Object> params, ReviewParam name, String fallback) {
